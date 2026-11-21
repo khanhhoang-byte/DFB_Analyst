@@ -1,0 +1,11 @@
+.trae/
+trea/
+.venv/
+__pycache__/
+**/__pycache__/
+_pycache_/
+**/_pycache_/
+*.py[cod]
+*.egg-info/
+.env
+

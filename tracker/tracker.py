@@ -5,14 +5,61 @@ import os
 import numpy as np
 import pandas as pd
 import cv2
-import sys 
-sys.path.append('../')
 from utils import get_center_of_bbox, get_bbox_width, get_foot_position
 
+
+def _create_byte_tracker():
+    try:
+        from supervision.tracker.byte_track import ByteTrack
+
+        return ByteTrack()
+    except Exception:
+        pass
+
+    try:
+        from supervision.tracker.byte_tracker import ByteTrack
+
+        return ByteTrack()
+    except Exception:
+        pass
+
+    bt = getattr(sv, "ByteTrack", None)
+    if bt is None:
+        raise RuntimeError("ByteTrack is not available in the installed supervision package.")
+    return bt()
+
+
+def _is_git_lfs_pointer_file(path: str) -> bool:
+    try:
+        if not os.path.exists(path):
+            return False
+        with open(path, "rb") as f:
+            head = f.read(128)
+        return b"version https://git-lfs.github.com/spec/v1" in head
+    except Exception:
+        return False
+
 class Tracker:
-    def __init__(self, model_path):
-        self.model = YOLO(model_path) 
-        self.tracker = sv.ByteTrack()
+    def __init__(self, model_path, yolo_conf=0.25, yolo_iou=None, batch_size=20, device=None):
+        self.model_path = model_path
+        self.model = None
+        self.tracker = _create_byte_tracker()
+        self.yolo_conf = yolo_conf
+        self.yolo_iou = yolo_iou
+        self.batch_size = batch_size
+        self.device = device
+    
+    def _ensure_model(self):
+        if self.model is None:
+            if isinstance(self.model_path, str) and _is_git_lfs_pointer_file(self.model_path):
+                raise RuntimeError(
+                    "Model file is a Git LFS pointer. Download the real .pt weights (git lfs pull) "
+                    "or set DFB_MODEL_PATH to an actual weights file."
+                )
+            try:
+                self.model = YOLO(self.model_path)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load YOLO model from '{self.model_path}': {e}") from e
 
     def add_position_to_tracks(self,tracks):
         for object, object_tracks in tracks.items():
@@ -26,31 +73,93 @@ class Tracker:
                     tracks[object][frame_num][track_id]['position'] = position
 
     def interpolate_ball_positions(self,ball_positions):
-        # Extract the 'bbox' for the ball from each frame's positions
-        ball_positions = [x.get(1, {}).get('bbox', []) for x in ball_positions]
-    
-        # Check if ball_positions contain valid data
-        if not ball_positions or all(len(bbox) == 0 for bbox in ball_positions):
-            return [{1: {"bbox": []}} for _ in ball_positions]
+        bboxes = []
+        for frame_ball in ball_positions:
+            bbox = frame_ball.get(1, {}).get("bbox", [])
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                bboxes.append([float(v) for v in bbox])
+            else:
+                bboxes.append([np.nan, np.nan, np.nan, np.nan])
 
-        # Create a DataFrame from the ball positions
-        df_ball_positions = pd.DataFrame(ball_positions, columns=['x1', 'y1', 'x2', 'y2'])
+        if not bboxes or all(np.isnan(v).all() for v in np.asarray(bboxes)):
+            return [{1: {"bbox": []}} for _ in bboxes]
 
-        # Interpolate missing values
-        df_ball_positions = df_ball_positions.interpolate()
-        df_ball_positions = df_ball_positions.bfill()
+        df = pd.DataFrame(bboxes, columns=["x1", "y1", "x2", "y2"])
+        df = df.interpolate().ffill().bfill()
 
-        ball_positions = [{1: {"bbox": x}} for x in df_ball_positions.to_numpy().tolist()]
-
-        return ball_positions
+        result = []
+        for row in df.to_numpy().tolist():
+            if any(pd.isna(v) for v in row):
+                result.append({1: {"bbox": []}})
+            else:
+                result.append({1: {"bbox": row}})
+        return result
 
     def detect_frames(self, frames):
-        batch_size=20 
+        self._ensure_model()
         detections = [] 
-        for i in range(0,len(frames),batch_size):
-            detections_batch = self.model.predict(frames[i:i+batch_size],conf=0.1)
+        for i in range(0, len(frames), self.batch_size):
+            kwargs = {"conf": self.yolo_conf}
+            if self.yolo_iou is not None:
+                kwargs["iou"] = self.yolo_iou
+            if self.device is not None:
+                kwargs["device"] = self.device
+            detections_batch = self.model.predict(frames[i : i + self.batch_size], **kwargs)
             detections += detections_batch
         return detections
+    
+    def get_object_tracks_for_frame(self, frame):
+        self._ensure_model()
+
+        kwargs = {"conf": self.yolo_conf}
+        if self.yolo_iou is not None:
+            kwargs["iou"] = self.yolo_iou
+        if self.device is not None:
+            kwargs["device"] = self.device
+
+        detection = self.model.predict([frame], **kwargs)[0]
+        cls_names = detection.names
+        cls_names_inv = {v: k for k, v in cls_names.items()}
+
+        detection_supervision = sv.Detections.from_ultralytics(detection)
+
+        for object_ind, class_id in enumerate(detection_supervision.class_id):
+            if cls_names[class_id] == "goalkeeper":
+                detection_supervision.class_id[object_ind] = cls_names_inv["player"]
+
+        detection_with_tracks = self.tracker.update_with_detections(detection_supervision)
+
+        frame_tracks = {"players": {}, "referees": {}, "ball": {}}
+
+        for frame_detection in detection_with_tracks:
+            bbox = frame_detection[0].tolist()
+            cls_id = frame_detection[3]
+            track_id = frame_detection[4]
+
+            if cls_id == cls_names_inv["player"]:
+                frame_tracks["players"][track_id] = {"bbox": bbox}
+
+            if cls_id == cls_names_inv["referee"]:
+                frame_tracks["referees"][track_id] = {"bbox": bbox}
+
+        best_ball_bbox = None
+        best_ball_conf = -1.0
+        confidences = getattr(detection_supervision, "confidence", None)
+        if confidences is None:
+            confidences = [1.0] * len(detection_supervision.xyxy)
+
+        for bbox_arr, conf, cls_id in zip(detection_supervision.xyxy, confidences, detection_supervision.class_id):
+            if cls_id != cls_names_inv.get("ball"):
+                continue
+            conf_value = float(conf) if conf is not None else 0.0
+            if conf_value > best_ball_conf:
+                best_ball_conf = conf_value
+                best_ball_bbox = bbox_arr.tolist()
+
+        if best_ball_bbox is not None:
+            frame_tracks["ball"][1] = {"bbox": best_ball_bbox, "conf": best_ball_conf}
+
+        return frame_tracks
 
     def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
         
@@ -97,12 +206,24 @@ class Tracker:
                 if cls_id == cls_names_inv['referee']:
                     tracks["referees"][frame_num][track_id] = {"bbox":bbox}
             
-            for frame_detection in detection_supervision:
-                bbox = frame_detection[0].tolist()
-                cls_id = frame_detection[3]
+            best_ball_bbox = None
+            best_ball_conf = -1.0
+            if hasattr(detection_supervision, "xyxy") and hasattr(detection_supervision, "class_id"):
+                confidences = getattr(detection_supervision, "confidence", None)
+                if confidences is None:
+                    confidences = [1.0] * len(detection_supervision.xyxy)
+                for bbox_arr, conf, cls_id in zip(
+                    detection_supervision.xyxy, confidences, detection_supervision.class_id
+                ):
+                    if cls_id != cls_names_inv["ball"]:
+                        continue
+                    conf_value = float(conf) if conf is not None else 0.0
+                    if conf_value > best_ball_conf:
+                        best_ball_conf = conf_value
+                        best_ball_bbox = bbox_arr.tolist()
 
-                if cls_id == cls_names_inv['ball']:
-                    tracks["ball"][frame_num][1] = {"bbox":bbox}
+            if best_ball_bbox is not None:
+                tracks["ball"][frame_num][1] = {"bbox": best_ball_bbox, "conf": best_ball_conf}
 
         if stub_path is not None:
             with open(stub_path,'wb') as f:
@@ -183,10 +304,9 @@ class Tracker:
         alpha = 0.4
         cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
 
-        team_ball_control_till_frame = team_ball_control[:frame_num + 1]
-        # Get the number of times each team had ball control
-        team_1_num_frames = team_ball_control[0] if team_ball_control[0] is not None else 0
-        team_2_num_frames = team_ball_control[1] if team_ball_control[1] is not None else 0
+        history = list(team_ball_control[: frame_num + 1])
+        team_1_num_frames = sum(1 for t in history if t == 1)
+        team_2_num_frames = sum(1 for t in history if t == 2)
 
         total_frames = team_1_num_frames + team_2_num_frames
         if total_frames == 0:
@@ -235,3 +355,27 @@ class Tracker:
             output_video_frames.append(frame)
 
         return output_video_frames
+    
+    def draw_frame(self, frame, frame_tracks, frame_num, team_ball_control):
+        frame = frame.copy()
+        player_dict = frame_tracks.get("players", {})
+        ball_dict = frame_tracks.get("ball", {})
+        referee_dict = frame_tracks.get("referees", {})
+
+        for track_id, player in player_dict.items():
+            color = player.get("team_color", (0, 0, 255))
+            frame = self.draw_ellipse(frame, player["bbox"], color, track_id)
+
+            if player.get("has_ball", False):
+                frame = self.draw_triangle(frame, player["bbox"], (0, 0, 255))
+
+        for _, referee in referee_dict.items():
+            frame = self.draw_ellipse(frame, referee["bbox"], (0, 255, 255))
+
+        for _, ball in ball_dict.items():
+            bbox = ball.get("bbox", [])
+            if bbox:
+                frame = self.draw_triangle(frame, bbox, (0, 255, 0))
+
+        frame = self.draw_team_ball_control(frame, frame_num, team_ball_control)
+        return frame

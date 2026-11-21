@@ -2,8 +2,6 @@ import pickle
 import cv2
 import numpy as np
 import os
-import sys 
-sys.path.append('../')
 from utils import measure_distance,measure_xy_distance
 
 class CameraMovementEstimator():
@@ -18,8 +16,11 @@ class CameraMovementEstimator():
 
         first_frame_grayscale = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
         mask_features = np.zeros_like(first_frame_grayscale)
-        mask_features[:,0:20] = 1
-        mask_features[:,900:1050] = 1
+        h, w = mask_features.shape[:2]
+        left_w = max(1, int(w * 0.05))
+        right_start = max(0, int(w * 0.95))
+        mask_features[:, 0:left_w] = 1
+        mask_features[:, right_start:w] = 1
 
         self.features = dict(
             maxCorners = 100,
@@ -50,15 +51,32 @@ class CameraMovementEstimator():
 
         old_gray = cv2.cvtColor(frames[0],cv2.COLOR_BGR2GRAY)
         old_features = cv2.goodFeaturesToTrack(old_gray,**self.features)
+        if old_features is None:
+            fallback_features = dict(self.features)
+            fallback_features["mask"] = None
+            old_features = cv2.goodFeaturesToTrack(old_gray, **fallback_features)
+            if old_features is None:
+                return camera_movement
 
         for frame_num in range(1,len(frames)):
             frame_gray = cv2.cvtColor(frames[frame_num],cv2.COLOR_BGR2GRAY)
-            new_features, _,_ = cv2.calcOpticalFlowPyrLK(old_gray,frame_gray,old_features,None,**self.lk_params)
+            if old_features is None or len(old_features) == 0:
+                old_features = cv2.goodFeaturesToTrack(frame_gray, **self.features)
+                old_gray = frame_gray.copy()
+                continue
+
+            new_features, st, _ = cv2.calcOpticalFlowPyrLK(old_gray,frame_gray,old_features,None,**self.lk_params)
+            if new_features is None or st is None:
+                old_features = cv2.goodFeaturesToTrack(frame_gray, **self.features)
+                old_gray = frame_gray.copy()
+                continue
 
             max_distance = 0
             camera_movement_x, camera_movement_y = 0,0
 
-            for i, (new,old) in enumerate(zip(new_features,old_features)):
+            for new, old, ok in zip(new_features, old_features, st):
+                if int(ok[0]) == 0:
+                    continue
                 new_features_point = new.ravel()
                 old_features_point = old.ravel()
 
@@ -70,6 +88,10 @@ class CameraMovementEstimator():
             if max_distance > self.minimum_distance:
                 camera_movement[frame_num] = [camera_movement_x,camera_movement_y]
                 old_features = cv2.goodFeaturesToTrack(frame_gray,**self.features)
+                if old_features is None:
+                    fallback_features = dict(self.features)
+                    fallback_features["mask"] = None
+                    old_features = cv2.goodFeaturesToTrack(frame_gray, **fallback_features)
 
             old_gray = frame_gray.copy()
         

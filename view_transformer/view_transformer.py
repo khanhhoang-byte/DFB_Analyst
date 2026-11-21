@@ -3,14 +3,15 @@ import numpy as np
 import cv2
 
 class ViewTransformer():
-    def __init__(self):
+    def __init__(self, frame):
         court_width = 68
         court_length = 23.32
 
-        self.pixel_vertices = np.array([[110, 1035], 
-                               [265, 275], 
-                               [910, 260], 
-                               [1640, 915]])
+        h, w = frame.shape[:2]
+        base_vertices = np.array([[110, 1035], [265, 275], [910, 260], [1640, 915]], dtype=np.float32)
+        base_w, base_h = 1920.0, 1080.0
+        normalized = base_vertices / np.array([base_w, base_h], dtype=np.float32)
+        self.pixel_vertices = normalized * np.array([float(w), float(h)], dtype=np.float32)
         
         self.target_vertices = np.array([
             [0,court_width],
@@ -19,13 +20,14 @@ class ViewTransformer():
             [court_length, court_width]
         ])
 
-        self.pixel_vertices = self.pixel_vertices.astype(np.float32)
         self.target_vertices = self.target_vertices.astype(np.float32)
 
         self.persepctive_trasnformer = cv2.getPerspectiveTransform(self.pixel_vertices, self.target_vertices)
 
     def transform_point(self,point):
-        p = (int(point[0]),int(point[1]))
+        if point is None or len(point) != 2:
+            return None
+        p = (int(point[0]), int(point[1]))
         is_inside = cv2.pointPolygonTest(self.pixel_vertices,p,False) >= 0 
         if not is_inside:
             return None

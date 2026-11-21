@@ -1,0 +1,33 @@
+[project]
+name = "dfb-analyst"
+version = "0.1.0"
+description = "Football analysis pipeline: detection, tracking, team assignment, camera movement, and speed/distance estimation."
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "fastapi",
+  "numpy",
+  "opencv-python",
+  "pandas",
+  "python-dotenv",
+  "scikit-learn",
+  "supervision",
+  "ultralytics",
+  "uvicorn[standard]",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = [
+  "camera_movement_estimator",
+  "player_ball_assigner",
+  "speed_and_distance_estimator",
+  "team_assigner",
+  "tracker",
+  "utils",
+  "view_transformer",
+]
+

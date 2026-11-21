@@ -1,24 +1,32 @@
 from utils import read_video, save_video
 from tracker import Tracker
-import cv2
 import numpy as np
 from team_assigner import TeamAssigner
 from player_ball_assigner import PlayerBallAssigner
 from camera_movement_estimator import CameraMovementEstimator
 from view_transformer import ViewTransformer
 from speed_and_distance_estimator import SpeedAndDistance_Estimator
+from settings import get_settings
 
 def main():
-    #Read video
-    video_path = r'D:\Project Pyrhon\FootBall Analyst\input_videos\0a2d9b_8_converted.avi'
-    video_frames = read_video(video_path)
+    settings = get_settings()
+
+    video_frames = read_video(str(settings.video_path))
+    if not video_frames:
+        return
 
     #Tracker
-    tracker = Tracker('models/best.pt')
+    tracker = Tracker(
+        str(settings.model_path),
+        yolo_conf=settings.yolo_conf,
+        yolo_iou=settings.yolo_iou,
+        batch_size=settings.yolo_batch_size,
+        device=settings.yolo_device,
+    )
 
     tracks = tracker.get_object_tracks(video_frames,
-                                       read_from_stub=True,
-                                       stub_path='stubs/track_stubs.pkl')
+                                       read_from_stub=settings.use_stubs,
+                                       stub_path=str(settings.track_stub_path))
     
     # Get object positions 
     tracker.add_position_to_tracks(tracks)
@@ -26,12 +34,12 @@ def main():
     # camera movement estimator
     camera_movement_estimator = CameraMovementEstimator(video_frames[0])
     camera_movement_per_frame = camera_movement_estimator.get_camera_movement(video_frames,
-                                                                                read_from_stub=True,
-                                                                                stub_path='stubs/camera_movement_stub.pkl')
+                                                                                read_from_stub=settings.use_stubs,
+                                                                                stub_path=str(settings.camera_stub_path))
     camera_movement_estimator.add_adjust_positions_to_tracks(tracks,camera_movement_per_frame)
 
     # View Trasnformer
-    view_transformer = ViewTransformer()
+    view_transformer = ViewTransformer(video_frames[0])
     view_transformer.add_transformed_position_to_tracks(tracks)
 
     # Interpolate Ball Positions
@@ -51,46 +59,32 @@ def main():
             team = team_assigner.get_player_team(video_frames[frame_num],   
                                                  track['bbox'],
                                                  player_id)
+            if team is None:
+                continue
             tracks['players'][frame_num][player_id]['team'] = team 
-            tracks['players'][frame_num][player_id]['team_color'] = team_assigner.team_colors[team]
+            tracks['players'][frame_num][player_id]['team_color'] = tuple(map(int, team_assigner.team_colors[team]))
 
     
     # Assign Ball Aquisition
     player_assigner =PlayerBallAssigner()
-    team_ball_control= []
+    team_ball_control = []
+    last_team_in_control = None
     for frame_num, player_track in enumerate(tracks['players']):
-        if frame_num in tracks['ball']:
-            if 1 in tracks['ball'][frame_num]:
-                ball_bbox = tracks['ball'][frame_num][1]['bbox']
-                assigned_player = player_assigner.assign_ball_to_player(player_track, ball_bbox)
+        ball_bbox = tracks['ball'][frame_num].get(1, {}).get('bbox', [])
+        assigned_player = -1
+        if ball_bbox:
+            assigned_player = player_assigner.assign_ball_to_player(player_track, ball_bbox)
 
-                if assigned_player != -1:
-                    tracks['players'][frame_num][assigned_player]['has_ball'] = True
-                    team_ball_control.append(tracks['players'][frame_num][assigned_player]['team'])
-                else:
-                    if team_ball_control:
-                        team_ball_control.append(team_ball_control[-1])
-                    else:
-                        team_ball_control.append(None)
-            else:
-                print(f"Key '1' not found in tracks['ball'][{frame_num}]")
-                if team_ball_control:
-                    team_ball_control.append(team_ball_control[-1])
-                else:
-                    team_ball_control.append(None)
-        else:
-            print(f"Key '{frame_num}' not found in tracks['ball']")
-            if team_ball_control:
-                team_ball_control.append(team_ball_control[-1])
-            else:
-                team_ball_control.append(None)
+        if assigned_player != -1:
+            tracks['players'][frame_num][assigned_player]['has_ball'] = True
+            last_team_in_control = tracks['players'][frame_num][assigned_player].get('team', last_team_in_control)
 
-    team_ball_control = np.array(team_ball_control)
+        team_ball_control.append(last_team_in_control)
     
 
     # Draw output 
     ## Draw object Tracks
-    output_video_frames = tracker.draw_annotations(video_frames,tracks,team_ball_control)
+    output_video_frames = tracker.draw_annotations(video_frames,tracks,np.array(team_ball_control, dtype=object))
 
     ## Draw Camera movement
     output_video_frames = camera_movement_estimator.draw_camera_movement(output_video_frames,camera_movement_per_frame)
@@ -100,11 +94,7 @@ def main():
 
 
     #Save video
-    if video_frames:
-       output_video_path = r'D:\Project Pyrhon\FootBall Analyst\output_videos\output_video.avi'
-       save_video(output_video_frames, output_video_path)
-    else:
-       print(f"Failed to read any frames from {video_path}")
+    save_video(output_video_frames, str(settings.output_video_path))
 
 if __name__ == "__main__":
     main()

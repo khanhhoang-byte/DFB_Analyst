@@ -17,11 +17,28 @@ The following modules are used in this project:
 - [Trained Yolo v5](https://drive.google.com/file/d/1DC2kCygbBWUKheQ_9cFziCsYVSRw6axK/view?usp=sharing)
 
 ## Requirements
-To run this project, you need to have the following requirements installed:
-- Python 3.x
-- ultralytics
-- supervision
-- OpenCV
-- NumPy
-- Matplotlib
-- Pandas
+To run this project, you need:
+- Python 3.10+
+- A Python environment with the dependencies from `pyproject.toml`
+
+## Setup (uv)
+1. Install uv (see https://github.com/astral-sh/uv)
+2. Create the environment and install dependencies:
+   - `uv sync`
+3. Copy environment config:
+   - `copy .env.example .env`
+4. Run:
+   - `uv run python main.py`
+
+## Realtime (prototype)
+- Mục tiêu: chạy gần realtime từ một nguồn video (webcam / file / RTSP / HLS URL nếu OpenCV đọc được) và xem kết quả trong trình duyệt.
+- Lưu ý: nếu nguồn “web đang chiếu” là DRM (Widevine/PlayReady) thì không lấy trực tiếp URL stream được; khi đó cần giải pháp capture màn hình.
+- Lưu ý model: cần weights hợp lệ cho Ultralytics YOLO. Nếu `models/best.pt` không load được, hãy thử đặt `DFB_MODEL_PATH=yolov8x.pt` hoặc trỏ tới weights của bạn.
+- Ghi chú repo: các file `.pt` trong repo hiện là Git LFS pointer, nên cần tải weights thật (git lfs pull) hoặc bật `DFB_USE_STUBS=1` để chạy demo bằng stub cho video mẫu.
+
+1. Cấu hình nguồn realtime trong `.env`:
+   - `DFB_REALTIME_SOURCE=0` (webcam) hoặc `DFB_REALTIME_SOURCE=rtsp://...` hoặc `DFB_REALTIME_SOURCE=https://...m3u8`
+2. Chạy server:
+   - `uv run python realtime_server.py`
+3. Mở trình duyệt:
+   - `http://127.0.0.1:8000/`
